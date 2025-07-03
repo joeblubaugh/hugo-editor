@@ -1,0 +1,17 @@
+[Unit]
+Description="Frontend for editing blog posts"
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=boxyboy
+# Note: your 
+# Fill in these lines and then un-comment
+# Environment=SITE_DIR=
+# Environment=SERVER_PORT=
+# Environment=HUGO_SERVER_PORT=
+# Environment=PUBLISH_CMD=
+# Environment=GIT_TOKEN=
+# ExecStart=/usr/local/bin/hugo-editor/run.sh
+

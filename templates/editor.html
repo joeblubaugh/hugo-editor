@@ -1,0 +1,144 @@
+{{ define "content" }}
+<div class="bg-white shadow rounded-lg p-6">
+  <div class="flex justify-between items-center mb-6">
+    <h1 class="text-2xl font-bold">
+      {{ if .IsNew }}New Post{{ else }}Edit Post{{ end }}
+    </h1>
+    <div class="flex items-center space-x-4">
+      <div id="save-indicator" class="text-gray invisible">Saving...</div>
+      <button
+        id="publish-btn"
+        class="bg-indigo-600 text-white px-4 py-2 rounded hover:bg-indigo-700"
+      >
+        Publish
+      </button>
+    </div>
+  </div>
+
+  <form enctype="multipart/form-data" id="editor-form" class="space-y-4">
+    <input type="hidden" id="file-path" name="path" value="{{ .Path }}" />
+
+    <div>
+      <textarea
+        id="content"
+        name="content"
+        rows="30"
+        class="w-full terminal-textarea"
+      >
+{{ .Content }}</textarea
+      >
+    </div>
+  </form>
+
+  <div id="status-message" class="mt-4 p-3 rounded-md hidden"></div>
+</div>
+{{ end }} {{ define "scripts" }}
+<script>
+  document.addEventListener("DOMContentLoaded", function () {
+    const form = document.getElementById("editor-form");
+    const publishBtn = document.getElementById("publish-btn");
+    const contentTextarea = document.getElementById("content");
+    const statusMessage = document.getElementById("status-message");
+
+    let lastSavedContent = contentTextarea.value;
+    let saveTimeout = null;
+
+    // Function to show status message
+    function showStatus(message, type) {
+      statusMessage.textContent = message;
+      statusMessage.className = "mt-4 p-3 rounded-md";
+
+      if (type === "success") {
+        statusMessage.classList.add("bg-green-100", "text-green-800");
+      } else if (type === "error") {
+        statusMessage.classList.add("bg-red-100", "text-red-800");
+      } else if (type === "info") {
+        statusMessage.classList.add("bg-blue-100", "text-blue-800");
+      }
+
+      statusMessage.classList.remove("hidden");
+
+      // Hide the message after 3 seconds
+      setTimeout(() => {
+        statusMessage.classList.add("hidden");
+      }, 3000);
+    }
+
+    // Function to save content
+    function saveContent() {
+      const currentContent = contentTextarea.value;
+
+      // If content hasn't changed, don't save
+      if (currentContent === lastSavedContent) {
+        return;
+      }
+
+      const formData = new FormData(form);
+
+      // Set the "save" indicator active
+      document.getElementById("save-indicator").classList.remove("invisible");
+      fetch("/save", {
+        method: "POST",
+        body: formData,
+      })
+        .then((response) => response.json())
+        .then((data) => {
+          if (data.success) {
+            lastSavedContent = currentContent;
+            document.getElementById("file-path").value = data.path;
+            showStatus("Saved successfully", "success");
+            document
+              .getElementById("save-indicator")
+              .classList.add("invisible");
+          } else {
+            showStatus("Error saving: " + data.error, "error");
+          }
+        })
+        .catch((error) => {
+          showStatus("Error saving: " + error.message, "error");
+        });
+    }
+
+    // Auto-save when user stops typing
+    function scheduleAutoSave() {
+      if (saveTimeout) {
+        clearTimeout(saveTimeout);
+      }
+
+      saveTimeout = setTimeout(saveContent, 2000); // 2-second delay
+
+      // Set the "save" indicator active
+      document.getElementById("save-indicator").classList.remove("invisible");
+    }
+
+    // Event listeners
+    contentTextarea.addEventListener("input", scheduleAutoSave);
+
+    // Publish button
+    publishBtn.addEventListener("click", function (e) {
+      e.preventDefault();
+
+      // First save the content
+      saveContent();
+
+      // Then publish
+      showStatus("Publishing...", "info");
+
+      fetch("/publish", {
+        method: "POST",
+      })
+        .then((response) => response.json())
+        .then((data) => {
+          if (data.success) {
+            showStatus("Published successfully", "success");
+          } else {
+            showStatus("Error publishing: " + data.error, "error");
+          }
+        })
+        .catch((error) => {
+          showStatus("Error publishing: " + error.message, "error");
+        });
+    });
+  });
+</script>
+{{ end }}

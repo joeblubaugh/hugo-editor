@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ .Title }} - Hugo Editor</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .terminal-textarea {
+            font-family: 'Courier New', Courier, monospace;
+            background-color: #2d2d2d;
+            color: #f0f0f0;
+            padding: 1rem;
+            border: 1px solid #444;
+            border-radius: 0.25rem;
+            resize: vertical;
+            min-height: 400px;
+        }
+        .terminal-textarea:focus {
+            outline: none;
+            border-color: #6366f1;
+            box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2);
+        }
+    </style>
+    {{ block "head" . }}{{ end }}
+</head>
+<body class="bg-gray-100 min-h-screen">
+    <header class="bg-indigo-600 text-white shadow">
+        <div class="container mx-auto px-4 py-4">
+            <div class="flex justify-between items-center">
+                <a href="/" class="text-xl font-bold">Hugo Editor</a>
+                <div class="space-x-4">
+                    <a href="/" class="hover:underline">Home</a>
+                    <a href="/new" class="hover:underline">New Post</a>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <main class="container mx-auto px-4 py-8">
+        {{ block "content" . }}{{ end }}
+    </main>
+
+    <footer class="bg-gray-200 py-4 mt-8">
+        <div class="container mx-auto px-4 text-center text-gray-600">
+            <p>Hugo Editor - A simple web application for editing Hugo markdown files</p>
+        </div>
+    </footer>
+
+    {{ block "scripts" . }}{{ end }}
+</body>
+</html>
+
