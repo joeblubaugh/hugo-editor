@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -9,11 +10,13 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -67,10 +70,36 @@ func main() {
 	fs := http.FileServer(http.Dir("./static"))
 	http.Handle("/static/", http.StripPrefix("/static/", fs))
 
+	server := &http.Server{
+		Addr:         fmt.Sprintf(":%d", config.ServerPort),
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 10 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
+
+	// Set up shutdown handling
+	go func() {
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+		<-sigChan
+
+		log.Println("Shutting down server...")
+		err := stopHugoServer()
+		if err != nil {
+			log.Println("Error shutting down hugo server", err.Error())
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		err = server.Shutdown(ctx)
+		if err != nil {
+			log.Println("Error shutting down web server", err.Error())
+		}
+	}()
+
 	// Start the server
-	serverAddr := fmt.Sprintf(":%d", config.ServerPort)
-	log.Printf("Starting editor server at http://localhost%s", serverAddr)
-	log.Fatal(http.ListenAndServe(serverAddr, nil))
+	log.Printf("Starting editor server at http://localhost%s", server.Addr)
+	log.Fatal(server.ListenAndServe())
 }
 
 // Post represents a Hugo markdown post
@@ -215,8 +244,25 @@ func findMarkdownFiles() ([]Post, error) {
 	return posts, nil
 }
 
+// prevents directory traversal
+func validatePath(path string) (string, error) {
+	// Clean the path and check for directory traversal
+	cleanPath := filepath.Clean(path)
+	if strings.Contains(cleanPath, "..") {
+		return "", fmt.Errorf("invalid path: directory traversal not allowed")
+	}
+	if filepath.IsAbs(cleanPath) {
+		return "", fmt.Errorf("invalid path: absolute paths not allowed")
+	}
+	return cleanPath, nil
+}
+
 // getPost retrieves a specific post by its path
-func getPost(path string) (Post, error) {
+func getPost(path string) (_ Post, err error) {
+	if path, err = validatePath(path); err != nil {
+		return Post{}, err
+	}
+
 	contentDir := filepath.Join(config.HugoSiteDir, "content", "blog")
 	fullPath := filepath.Join(contentDir, path)
 
@@ -277,7 +323,11 @@ func getPost(path string) (Post, error) {
 }
 
 // savePost saves the content of a post
-func savePost(path, content string) error {
+func savePost(path, content string) (err error) {
+	if path, err = validatePath(path); err != nil {
+		return err
+	}
+
 	mu.Lock()
 	defer mu.Unlock()
 
@@ -295,8 +345,8 @@ func savePost(path, content string) error {
 }
 
 // gitHasChanges checks if there are any uncommitted changes in the git repository
-func gitHasChanges() (bool, error) {
-	cmd := exec.Command("git", "status", "--porcelain")
+func gitHasChanges(ctx context.Context) (bool, error) {
+	cmd := exec.CommandContext(ctx, "git", "status", "--porcelain")
 	cmd.Dir = config.HugoSiteDir
 
 	output, err := cmd.Output()
@@ -309,9 +359,9 @@ func gitHasChanges() (bool, error) {
 }
 
 // gitCommitChanges creates a git commit with all changes
-func gitCommitChanges() error {
+func gitCommitChanges(ctx context.Context) error {
 	// Add all changes
-	addCmd := exec.Command("git", "add", ".")
+	addCmd := exec.CommandContext(ctx, "git", "add", ".")
 	addCmd.Dir = config.HugoSiteDir
 	if err := addCmd.Run(); err != nil {
 		return fmt.Errorf("failed to add changes: %v", err)
@@ -319,7 +369,7 @@ func gitCommitChanges() error {
 
 	// Create commit with timestamp
 	commitMsg := fmt.Sprintf("Auto-publish: %s", time.Now().Format("2006-01-02 15:04:05"))
-	commitCmd := exec.Command("git", "commit", "-m", commitMsg)
+	commitCmd := exec.CommandContext(ctx, "git", "commit", "-m", commitMsg)
 	commitCmd.Dir = config.HugoSiteDir
 
 	if err := commitCmd.Run(); err != nil {
@@ -331,9 +381,9 @@ func gitCommitChanges() error {
 }
 
 // gitPushChanges pushes the current branch to the remote repository
-func gitPushChanges() error {
+func gitPushChanges(ctx context.Context) error {
 	// Get current branch name
-	branchCmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
+	branchCmd := exec.CommandContext(ctx, "git", "rev-parse", "--abbrev-ref", "HEAD")
 	branchCmd.Dir = config.HugoSiteDir
 
 	branchOutput, err := branchCmd.Output()
@@ -345,7 +395,7 @@ func gitPushChanges() error {
 	log.Printf("Pushing branch: %s", currentBranch)
 
 	// Push to remote
-	pushCmd := exec.Command("git", "push", "origin", currentBranch)
+	pushCmd := exec.CommandContext(ctx, "git", "push", "origin", currentBranch)
 	pushCmd.Dir = config.HugoSiteDir
 
 	if err := pushCmd.Run(); err != nil {
@@ -357,7 +407,7 @@ func gitPushChanges() error {
 }
 
 // publishSite runs the publish command
-func publishSite() error {
+func publishSite(ctx context.Context) error {
 	// Stop the Hugo server
 	if err := stopHugoServer(); err != nil {
 		log.Printf("Warning: Failed to stop Hugo server: %v", err)
@@ -370,7 +420,7 @@ func publishSite() error {
 	}
 
 	// Create the command
-	cmd := exec.Command(parts[0], parts[1:]...)
+	cmd := exec.CommandContext(ctx, parts[0], parts[1:]...)
 	cmd.Dir = config.HugoSiteDir
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -627,17 +677,20 @@ func handlePublish(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create and push a git commit if there are any changes
-	hasChanges, err := gitHasChanges()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	hasChanges, err := gitHasChanges(ctx)
 	if err != nil {
 		log.Printf("Warning: Failed to check git status: %v", err)
 	} else if hasChanges {
 		log.Println("Git changes detected, creating commit...")
-		if err = gitCommitChanges(); err != nil {
+		if err = gitCommitChanges(ctx); err != nil {
 			log.Printf("Warning: Failed to create git commit: %v", err)
 		} else {
 			// Push the git branch if commit was successful
 			log.Println("Pushing changes to remote...")
-			if err = gitPushChanges(); err != nil {
+			if err = gitPushChanges(ctx); err != nil {
 				log.Printf("Warning: Failed to push changes: %v", err)
 			}
 		}
@@ -657,7 +710,7 @@ func handlePublish(w http.ResponseWriter, r *http.Request) {
 
 	// Run the publish command
 	if len(config.PublishCmd) > 0 {
-		err := publishSite()
+		err := publishSite(ctx)
 		if err != nil {
 			// Return JSON response with error
 			w.Header().Set("Content-Type", "application/json")
