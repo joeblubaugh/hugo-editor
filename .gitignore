@@ -1,2 +1,6 @@
+# Binaries
 hugo-editor
 cmd/hugo-editor/hugo-editor
+
+# Development setup
+.reflex
