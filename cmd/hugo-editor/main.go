@@ -119,6 +119,12 @@ func startHugoServer() {
 		log.Fatal("Invalid Hugo server command")
 	}
 
+	// Add the hugo port argument
+	parts = append(parts, "--port", fmt.Sprintf("%d",config.HugoServerPort))
+
+	// Add the site directory
+	parts = append(parts, "--source", config.HugoSiteDir)
+
 	// Create the command
 	hugoServer = exec.Command(parts[0], parts[1:]...)
 	hugoServer.Dir = config.HugoSiteDir
@@ -126,7 +132,7 @@ func startHugoServer() {
 	hugoServer.Stderr = os.Stderr
 
 	// Start the server
-	log.Printf("Starting Hugo server with command: %s", config.HugoServerCmd)
+	log.Printf("Starting Hugo server with command: %s %s", hugoServer.Path, strings.Join(hugoServer.Args, " "))
 	if err := hugoServer.Start(); err != nil {
 		log.Fatalf("Failed to start Hugo server: %v", err)
 	}
