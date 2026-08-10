@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"html/template"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -153,9 +155,13 @@ func startHugoServerLocked() {
 
 	// The preview is served through hugo-editor's own /preview/ proxy, so
 	// Hugo must generate asset and livereload links (and mount its own
-	// routes) under that path/port instead of its own raw address.
+	// routes) under that path/port instead of its own raw address. The
+	// literal host baked in here gets rewritten per-request by the proxy
+	// (see newPreviewProxy) to whatever host the browser actually used,
+	// since editors may be reached via a different IP/hostname than
+	// "localhost".
 	parts = append(parts,
-		"--baseURL", fmt.Sprintf("http://localhost:%d/preview/", config.ServerPort),
+		"--baseURL", hugoInternalBaseURL(),
 		"--appendPort=false",
 		"--liveReloadPort", fmt.Sprintf("%d", config.ServerPort),
 	)
@@ -241,18 +247,62 @@ func watchPreviewIdle() {
 	}
 }
 
+// hugoInternalBaseURL is the baseURL Hugo is told to render with. It always
+// names "localhost" since it's only used internally to get Hugo to mount its
+// routes and generate links under /preview/ - the proxy below rewrites the
+// literal host in responses to match whatever host the browser actually used.
+func hugoInternalBaseURL() string {
+	return fmt.Sprintf("http://localhost:%d/preview/", config.ServerPort)
+}
+
+type originalRequestKey struct{}
+
 // newPreviewProxy returns a reverse proxy to the on-demand Hugo server,
-// starting it on demand before the first request is forwarded.
+// starting it on demand before the first request is forwarded, and
+// rewriting any baked-in hugoInternalBaseURL references in text responses
+// to the host the browser actually connected to (e.g. a Tailscale IP or
+// LAN hostname instead of "localhost").
 func newPreviewProxy() http.Handler {
 	target := &url.URL{Scheme: "http", Host: fmt.Sprintf("localhost:%d", config.HugoServerPort)}
 	proxy := httputil.NewSingleHostReverseProxy(target)
+
+	proxy.ModifyResponse = func(resp *http.Response) error {
+		ct := resp.Header.Get("Content-Type")
+		if !strings.HasPrefix(ct, "text/") && !strings.Contains(ct, "xml") && !strings.Contains(ct, "javascript") && !strings.Contains(ct, "json") {
+			return nil
+		}
+
+		origReq, _ := resp.Request.Context().Value(originalRequestKey{}).(*http.Request)
+		if origReq == nil {
+			return nil
+		}
+
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return err
+		}
+
+		scheme := "http"
+		if origReq.TLS != nil || origReq.Header.Get("X-Forwarded-Proto") == "https" {
+			scheme = "https"
+		}
+		externalBaseURL := fmt.Sprintf("%s://%s/preview/", scheme, origReq.Host)
+
+		rewritten := bytes.ReplaceAll(body, []byte(hugoInternalBaseURL()), []byte(externalBaseURL))
+		resp.Body = io.NopCloser(bytes.NewReader(rewritten))
+		resp.ContentLength = int64(len(rewritten))
+		resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(rewritten)))
+		return nil
+	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := ensureHugoServerRunning(); err != nil {
 			http.Error(w, fmt.Sprintf("Hugo server did not start in time: %v", err), http.StatusServiceUnavailable)
 			return
 		}
-		proxy.ServeHTTP(w, r)
+		ctx := context.WithValue(r.Context(), originalRequestKey{}, r)
+		proxy.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
