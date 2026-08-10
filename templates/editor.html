@@ -1,6 +1,6 @@
 {{ define "content" }}
-<div class="bg-white shadow rounded-lg p-6">
-  <div class="flex justify-between items-center mb-6">
+<div class="bg-white shadow rounded-lg p-6 flex flex-col flex-1 min-h-0">
+  <div class="flex justify-between items-center mb-6 shrink-0">
     <h1 class="text-2xl font-bold">
       {{ if .IsNew }}New Post{{ else }}Edit Post{{ end }}
     </h1>
@@ -9,33 +9,29 @@
     </div>
   </div>
 
-  <div class="{{ if .PreviewURL }}grid grid-cols-2 gap-4{{ end }}">
-    <form enctype="multipart/form-data" id="editor-form" class="space-y-4">
+  <div class="flex-1 min-h-0 {{ if .PreviewURL }}grid grid-cols-2 gap-4{{ end }}">
+    <form enctype="multipart/form-data" id="editor-form" class="h-full">
       <input type="hidden" id="file-path" name="path" value="{{ .Path }}" />
 
-      <div>
-        <textarea
-          id="content"
-          name="content"
-          rows="30"
-          class="w-full terminal-textarea"
-        >
+      <textarea
+        id="content"
+        name="content"
+        class="w-full h-full terminal-textarea"
+      >
 {{ .Content }}</textarea
-        >
-      </div>
+      >
     </form>
 
     {{ if .PreviewURL }}
     <iframe
       id="preview-frame"
       src="{{ .PreviewURL }}"
-      class="w-full border rounded"
-      style="min-height: 500px"
+      class="w-full h-full border rounded"
     ></iframe>
     {{ end }}
   </div>
 
-  <div id="status-message" class="mt-4 p-3 rounded-md hidden"></div>
+  <div id="status-message" class="mt-4 p-3 rounded-md hidden shrink-0"></div>
 </div>
 {{ end }} {{ define "scripts" }}
 <script>

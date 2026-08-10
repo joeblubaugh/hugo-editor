@@ -73,7 +73,7 @@ func main() {
 	http.HandleFunc("/save", handleSave)
 	http.HandleFunc("/new", handleNew)
 	http.HandleFunc("/api/preview-heartbeat", handlePreviewHeartbeat)
-	http.Handle("/preview/", http.StripPrefix("/preview", newPreviewProxy()))
+	http.Handle("/preview/", newPreviewProxy())
 
 	// Serve static files
 	fs := http.FileServer(http.Dir("./static"))
@@ -150,6 +150,15 @@ func startHugoServerLocked() {
 
 	// Add the site directory
 	parts = append(parts, "--source", config.HugoSiteDir)
+
+	// The preview is served through hugo-editor's own /preview/ proxy, so
+	// Hugo must generate asset and livereload links (and mount its own
+	// routes) under that path/port instead of its own raw address.
+	parts = append(parts,
+		"--baseURL", fmt.Sprintf("http://localhost:%d/preview/", config.ServerPort),
+		"--appendPort=false",
+		"--liveReloadPort", fmt.Sprintf("%d", config.ServerPort),
+	)
 
 	// Create the command
 	cmd := exec.Command(parts[0], parts[1:]...)
