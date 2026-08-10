@@ -4,3 +4,7 @@ cmd/hugo-editor/hugo-editor
 
 # Development setup
 .reflex
+
+# Hugo build output in test site
+testdata/hugosite/public/
+testdata/hugosite/.hugo_build.lock

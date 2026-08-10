@@ -6,29 +6,34 @@
     </h1>
     <div class="flex items-center space-x-4">
       <div id="save-indicator" class="text-gray invisible">Saving...</div>
-      <button
-        id="publish-btn"
-        class="bg-indigo-600 text-white px-4 py-2 rounded hover:bg-indigo-700"
-      >
-        Publish
-      </button>
     </div>
   </div>
 
-  <form enctype="multipart/form-data" id="editor-form" class="space-y-4">
-    <input type="hidden" id="file-path" name="path" value="{{ .Path }}" />
+  <div class="{{ if .PreviewURL }}grid grid-cols-2 gap-4{{ end }}">
+    <form enctype="multipart/form-data" id="editor-form" class="space-y-4">
+      <input type="hidden" id="file-path" name="path" value="{{ .Path }}" />
 
-    <div>
-      <textarea
-        id="content"
-        name="content"
-        rows="30"
-        class="w-full terminal-textarea"
-      >
+      <div>
+        <textarea
+          id="content"
+          name="content"
+          rows="30"
+          class="w-full terminal-textarea"
+        >
 {{ .Content }}</textarea
-      >
-    </div>
-  </form>
+        >
+      </div>
+    </form>
+
+    {{ if .PreviewURL }}
+    <iframe
+      id="preview-frame"
+      src="{{ .PreviewURL }}"
+      class="w-full border rounded"
+      style="min-height: 500px"
+    ></iframe>
+    {{ end }}
+  </div>
 
   <div id="status-message" class="mt-4 p-3 rounded-md hidden"></div>
 </div>
@@ -36,7 +41,6 @@
 <script>
   document.addEventListener("DOMContentLoaded", function () {
     const form = document.getElementById("editor-form");
-    const publishBtn = document.getElementById("publish-btn");
     const contentTextarea = document.getElementById("content");
     const statusMessage = document.getElementById("status-message");
 
@@ -114,31 +118,14 @@
     // Event listeners
     contentTextarea.addEventListener("input", scheduleAutoSave);
 
-    // Publish button
-    publishBtn.addEventListener("click", function (e) {
-      e.preventDefault();
-
-      // First save the content
-      saveContent();
-
-      // Then publish
-      showStatus("Publishing...", "info");
-
-      fetch("/publish", {
-        method: "POST",
-      })
-        .then((response) => response.json())
-        .then((data) => {
-          if (data.success) {
-            showStatus("Published successfully", "success");
-          } else {
-            showStatus("Error publishing: " + data.error, "error");
-          }
-        })
-        .catch((error) => {
-          showStatus("Error publishing: " + error.message, "error");
-        });
-    });
+    // Keep the live preview's Hugo server alive while this page is open.
+    // Closing the tab or navigating away simply stops these pings, and the
+    // server notices the silence and shuts Hugo server back down.
+    if (document.getElementById("preview-frame")) {
+      const pingPreview = () => fetch("/api/preview-heartbeat", { method: "POST" });
+      pingPreview();
+      setInterval(pingPreview, 5000);
+    }
   });
 </script>
 {{ end }}

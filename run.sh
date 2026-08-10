@@ -14,5 +14,5 @@ git switch main
 git pull
 
 # Run the program until it exits
-/usr/local/bin/hugo-editor/hugo-editor --site $SITE_DIR --server_port $SERVER_PORT --hugo-port $HUGO_SERVER_PORT --publish-cmd $PUBLISH_CMD
+/usr/local/bin/hugo-editor/hugo-editor --site $SITE_DIR --server_port $SERVER_PORT --hugo-port $HUGO_SERVER_PORT
 
