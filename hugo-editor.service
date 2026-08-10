@@ -11,7 +11,6 @@ User=boxyboy
 # Environment=SITE_DIR=
 # Environment=SERVER_PORT=
 # Environment=HUGO_SERVER_PORT=
-# Environment=PUBLISH_CMD=
 # Environment=GIT_TOKEN=
 # ExecStart=/usr/local/bin/hugo-editor/run.sh
 

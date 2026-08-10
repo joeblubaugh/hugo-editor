@@ -7,7 +7,10 @@ import (
 	"fmt"
 	"html/template"
 	"log"
+	"net"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -24,23 +27,28 @@ import (
 type Config struct {
 	HugoSiteDir    string
 	HugoServerCmd  string
-	PublishCmd     string
 	ServerPort     int
 	AutosaveDelay  time.Duration
 	HugoServerPort int
 }
 
 var (
-	config     Config
-	hugoServer *exec.Cmd
-	mu         sync.Mutex // Mutex for file operations
+	config Config
+	mu     sync.Mutex // Mutex for file operations
 )
+
+// previewState tracks the on-demand Hugo preview server's lifecycle.
+var previewState = struct {
+	mu            sync.Mutex
+	cmd           *exec.Cmd
+	running       bool
+	lastHeartbeat time.Time
+}{}
 
 func main() {
 	// Parse command line flags
 	flag.StringVar(&config.HugoSiteDir, "site", "", "Path to Hugo site directory")
 	flag.StringVar(&config.HugoServerCmd, "hugo-cmd", "hugo server -D", "Command to run Hugo server")
-	flag.StringVar(&config.PublishCmd, "publish-cmd", "hugo", "Command to build and publish the site")
 	flag.IntVar(&config.ServerPort, "port", 8080, "Port for the editor server")
 	flag.DurationVar(&config.AutosaveDelay, "autosave", 2*time.Second, "Delay for autosaving")
 	flag.IntVar(&config.HugoServerPort, "hugo-port", 1313, "Port for the Hugo server")
@@ -56,15 +64,16 @@ func main() {
 		log.Fatalf("Hugo site directory does not exist: %s", config.HugoSiteDir)
 	}
 
-	// Start the Hugo server
-	startHugoServer()
+	// Watch for idle previews and stop the Hugo server once nobody is watching
+	go watchPreviewIdle()
 
 	// Set up HTTP routes
 	http.HandleFunc("/", handleIndex)
 	http.HandleFunc("/edit/", handleEdit)
 	http.HandleFunc("/save", handleSave)
-	http.HandleFunc("/publish", handlePublish)
 	http.HandleFunc("/new", handleNew)
+	http.HandleFunc("/api/preview-heartbeat", handlePreviewHeartbeat)
+	http.Handle("/preview/", http.StripPrefix("/preview", newPreviewProxy()))
 
 	// Serve static files
 	fs := http.FileServer(http.Dir("./static"))
@@ -111,8 +120,25 @@ type Post struct {
 	IsNew   bool
 }
 
-// startHugoServer starts the Hugo server in development mode
-func startHugoServer() {
+// ensureHugoServerRunning starts the Hugo server on demand if it isn't
+// already running, then waits for it to start accepting connections.
+func ensureHugoServerRunning() error {
+	previewState.mu.Lock()
+	if previewState.running {
+		previewState.lastHeartbeat = time.Now()
+		previewState.mu.Unlock()
+		return nil
+	}
+	startHugoServerLocked()
+	previewState.lastHeartbeat = time.Now()
+	previewState.mu.Unlock()
+
+	return waitForHugoServerReady(5 * time.Second)
+}
+
+// startHugoServerLocked starts the Hugo server in development mode.
+// Callers must hold previewState.mu.
+func startHugoServerLocked() {
 	// Split the command into parts
 	parts := strings.Fields(config.HugoServerCmd)
 	if len(parts) == 0 {
@@ -120,46 +146,121 @@ func startHugoServer() {
 	}
 
 	// Add the hugo port argument
-	parts = append(parts, "--port", fmt.Sprintf("%d",config.HugoServerPort))
+	parts = append(parts, "--port", fmt.Sprintf("%d", config.HugoServerPort))
 
 	// Add the site directory
 	parts = append(parts, "--source", config.HugoSiteDir)
 
 	// Create the command
-	hugoServer = exec.Command(parts[0], parts[1:]...)
-	hugoServer.Dir = config.HugoSiteDir
-	hugoServer.Stdout = os.Stdout
-	hugoServer.Stderr = os.Stderr
+	cmd := exec.Command(parts[0], parts[1:]...)
+	cmd.Dir = config.HugoSiteDir
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
 
-	// Start the server
-	log.Printf("Starting Hugo server with command: %s %s", hugoServer.Path, strings.Join(hugoServer.Args, " "))
-	if err := hugoServer.Start(); err != nil {
+	log.Printf("Starting Hugo server with command: %s %s", cmd.Path, strings.Join(cmd.Args, " "))
+	if err := cmd.Start(); err != nil {
 		log.Fatalf("Failed to start Hugo server: %v", err)
 	}
 
-	// Set up cleanup on program exit
-	go func() {
-		<-time.After(2 * time.Second)
-		log.Printf("Hugo server running at http://localhost:%d", config.HugoServerPort)
-	}()
+	previewState.cmd = cmd
+	previewState.running = true
+}
+
+// waitForHugoServerReady polls the configured Hugo port until it accepts
+// TCP connections, or the timeout elapses.
+func waitForHugoServerReady(timeout time.Duration) error {
+	addr := fmt.Sprintf("localhost:%d", config.HugoServerPort)
+	deadline := time.Now().Add(timeout)
+
+	for {
+		conn, err := net.DialTimeout("tcp", addr, 250*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			log.Printf("Hugo server running at http://%s", addr)
+			return nil
+		}
+
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timed out waiting for Hugo server at %s: %w", addr, err)
+		}
+
+		time.Sleep(250 * time.Millisecond)
+	}
 }
 
 // stopHugoServer stops the Hugo server if it's running
 func stopHugoServer() error {
-	if hugoServer == nil || hugoServer.Process == nil {
+	previewState.mu.Lock()
+	defer previewState.mu.Unlock()
+
+	if previewState.cmd == nil || previewState.cmd.Process == nil {
+		previewState.running = false
 		return nil
 	}
 
 	log.Println("Stopping Hugo server...")
+	cmd := previewState.cmd
 
 	// Send interrupt signal to allow graceful shutdown
-	if err := hugoServer.Process.Signal(os.Interrupt); err != nil {
+	var err error
+	if sigErr := cmd.Process.Signal(os.Interrupt); sigErr != nil {
 		// If interrupt fails, try to kill the process
-		return hugoServer.Process.Kill()
+		err = cmd.Process.Kill()
+	} else {
+		// Wait for the process to exit
+		err = cmd.Wait()
 	}
 
-	// Wait for the process to exit
-	return hugoServer.Wait()
+	previewState.cmd = nil
+	previewState.running = false
+	return err
+}
+
+// watchPreviewIdle stops the Hugo server once the editor page's heartbeat
+// pings stop arriving (tab closed, navigated away, or crashed).
+func watchPreviewIdle() {
+	for range time.Tick(5 * time.Second) {
+		previewState.mu.Lock()
+		idle := previewState.running && time.Since(previewState.lastHeartbeat) > 20*time.Second
+		previewState.mu.Unlock()
+
+		if idle {
+			if err := stopHugoServer(); err != nil {
+				log.Printf("Error stopping idle Hugo server: %v", err)
+			}
+		}
+	}
+}
+
+// newPreviewProxy returns a reverse proxy to the on-demand Hugo server,
+// starting it on demand before the first request is forwarded.
+func newPreviewProxy() http.Handler {
+	target := &url.URL{Scheme: "http", Host: fmt.Sprintf("localhost:%d", config.HugoServerPort)}
+	proxy := httputil.NewSingleHostReverseProxy(target)
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := ensureHugoServerRunning(); err != nil {
+			http.Error(w, fmt.Sprintf("Hugo server did not start in time: %v", err), http.StatusServiceUnavailable)
+			return
+		}
+		proxy.ServeHTTP(w, r)
+	})
+}
+
+// handlePreviewHeartbeat is pinged periodically by the editor page while a
+// preview panel is open, keeping the Hugo server alive.
+func handlePreviewHeartbeat(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if err := ensureHugoServerRunning(); err != nil {
+		http.Error(w, fmt.Sprintf("Hugo server did not start in time: %v", err), http.StatusServiceUnavailable)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // findMarkdownFiles finds all markdown files in the content directory
@@ -350,98 +451,6 @@ func savePost(path, content string) (err error) {
 	return os.WriteFile(fullPath, []byte(content), 0o644)
 }
 
-// gitHasChanges checks if there are any uncommitted changes in the git repository
-func gitHasChanges(ctx context.Context) (bool, error) {
-	cmd := exec.CommandContext(ctx, "git", "status", "--porcelain")
-	cmd.Dir = config.HugoSiteDir
-
-	output, err := cmd.Output()
-	if err != nil {
-		return false, fmt.Errorf("failed to check git status: %v", err)
-	}
-
-	// If output is empty, there are no changes
-	return len(strings.TrimSpace(string(output))) > 0, nil
-}
-
-// gitCommitChanges creates a git commit with all changes
-func gitCommitChanges(ctx context.Context) error {
-	// Add all changes
-	addCmd := exec.CommandContext(ctx, "git", "add", ".")
-	addCmd.Dir = config.HugoSiteDir
-	if err := addCmd.Run(); err != nil {
-		return fmt.Errorf("failed to add changes: %v", err)
-	}
-
-	// Create commit with timestamp
-	commitMsg := fmt.Sprintf("Auto-publish: %s", time.Now().Format("2006-01-02 15:04:05"))
-	commitCmd := exec.CommandContext(ctx, "git", "commit", "-m", commitMsg)
-	commitCmd.Dir = config.HugoSiteDir
-
-	if err := commitCmd.Run(); err != nil {
-		return fmt.Errorf("failed to commit changes: %v", err)
-	}
-
-	log.Printf("Created git commit: %s", commitMsg)
-	return nil
-}
-
-// gitPushChanges pushes the current branch to the remote repository
-func gitPushChanges(ctx context.Context) error {
-	// Get current branch name
-	branchCmd := exec.CommandContext(ctx, "git", "rev-parse", "--abbrev-ref", "HEAD")
-	branchCmd.Dir = config.HugoSiteDir
-
-	branchOutput, err := branchCmd.Output()
-	if err != nil {
-		return fmt.Errorf("failed to get current branch: %v", err)
-	}
-
-	currentBranch := strings.TrimSpace(string(branchOutput))
-	log.Printf("Pushing branch: %s", currentBranch)
-
-	// Push to remote
-	pushCmd := exec.CommandContext(ctx, "git", "push", "origin", currentBranch)
-	pushCmd.Dir = config.HugoSiteDir
-
-	if err := pushCmd.Run(); err != nil {
-		return fmt.Errorf("failed to push changes: %v", err)
-	}
-
-	log.Printf("Successfully pushed changes to remote")
-	return nil
-}
-
-// publishSite runs the publish command
-func publishSite(ctx context.Context) error {
-	// Stop the Hugo server
-	if err := stopHugoServer(); err != nil {
-		log.Printf("Warning: Failed to stop Hugo server: %v", err)
-	}
-
-	// Split the command into parts
-	parts := strings.Fields(config.PublishCmd)
-	if len(parts) == 0 {
-		return fmt.Errorf("invalid publish command")
-	}
-
-	// Create the command
-	cmd := exec.CommandContext(ctx, parts[0], parts[1:]...)
-	cmd.Dir = config.HugoSiteDir
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	// Run the command
-	log.Printf("Running publish command: %s", config.PublishCmd)
-	err := cmd.Run()
-
-	// Restart the Hugo server regardless of publish result
-	log.Println("Restarting Hugo server...")
-	startHugoServer()
-
-	return err
-}
-
 // Create a template function map
 var funcMap = template.FuncMap{
 	"trimSuffix": strings.TrimSuffix,
@@ -517,7 +526,7 @@ func handleEdit(w http.ResponseWriter, r *http.Request) {
 		Path:       post.Path,
 		Content:    post.Content,
 		IsNew:      false,
-		PreviewURL: fmt.Sprintf("http://localhost:%d/%s", config.HugoServerPort, strings.TrimSuffix(post.Path, ".md")),
+		PreviewURL: "/preview/blog/" + strings.TrimSuffix(post.Path, ".md"),
 	}
 
 	if err := tmpl.Execute(w, data); err != nil {
@@ -671,67 +680,6 @@ func handleSave(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"success": true,
 		"path":    path,
-	})
-}
-
-// handlePublish runs the publish command
-func handlePublish(w http.ResponseWriter, r *http.Request) {
-	// Only accept POST requests
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	// Create and push a git commit if there are any changes
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	hasChanges, err := gitHasChanges(ctx)
-	if err != nil {
-		log.Printf("Warning: Failed to check git status: %v", err)
-	} else if hasChanges {
-		log.Println("Git changes detected, creating commit...")
-		if err = gitCommitChanges(ctx); err != nil {
-			log.Printf("Warning: Failed to create git commit: %v", err)
-		} else {
-			// Push the git branch if commit was successful
-			log.Println("Pushing changes to remote...")
-			if err = gitPushChanges(ctx); err != nil {
-				log.Printf("Warning: Failed to push changes: %v", err)
-			}
-		}
-	} else {
-		log.Println("No git changes detected, skipping commit")
-	}
-
-	if err != nil {
-		// Return JSON response with error
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"success": false,
-			"error":   err.Error(),
-		})
-		return
-	}
-
-	// Run the publish command
-	if len(config.PublishCmd) > 0 {
-		err := publishSite(ctx)
-		if err != nil {
-			// Return JSON response with error
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"success": false,
-				"error":   err.Error(),
-			})
-			return
-		}
-	}
-
-	// Return success JSON response
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"success": true,
 	})
 }
 
